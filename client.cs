@@ -9,6 +9,9 @@ if($Pref::Client::Markov::LoadOnStart $= "") {
 	$Pref::Client::Markov::CorpusDirectory = "config/client/markov/corpus";
 	// 0 = learn only, 1 = user only, 2 = all
 	$Pref::Client::Markov::AllowChat = 0;
+	$Pref::Client::Markov::Blacklist = "Viso";
+	// 0 is the first word, 1 is anywhere in the string
+	$Pref::Client::Markov::BlacklistMode = 0;
 }
 
 function normalizeMarkov(%str) {
@@ -21,6 +24,12 @@ function MarkovPhraseDatabase::phraseExists(%this, %phrase) {
 }
 
 function MarkovPhraseDatabase::addToDatabase(%this, %string) {
+	if(getWordCount(%string) < 2) {
+		return;
+	}
+
+	echo("added" SPC %string);
+
 	%string = normalizeMarkov(%string);
 
 	for(%i=0;%i<getWordCount(%string);%i++) {
@@ -45,6 +54,7 @@ function MarkovPhraseDatabase::addToDatabase(%this, %string) {
 				class = "MarkovPhrase";
 				phrase = %prevWord SPC %currWord;
 				count = 0;
+				lastModified = getUTC();
 			};
 			%this.add(%obj);
 		}
@@ -64,6 +74,7 @@ function MarkovPhrase::addChoice(%this, %choice) {
 
 	%this.choice[%this.count] = %choice;
 	%this.count++;
+	%this.lastModified = getUTC();
 }
 
 function MarkovPhrase::getChoice(%this) {
@@ -73,7 +84,7 @@ function MarkovPhrase::getChoice(%this) {
 	return %this.choice[getRandom(0, %this.count-1)];
 }
 
-function MarkovPhraseDatabase::generate(%this) {
+function MarkovPhraseDatabase::generate(%this, %potential) {
 	if(%this.getCount() <= 0) {
 		return;
 	}
@@ -101,21 +112,36 @@ function MarkovPhraseDatabase::generate(%this) {
 function MarkovPhraseDatabase::exportDatabase(%this) {
 	%file = new FileObject();
 
+	%count = 0;
+
 	for(%i=0;%i<%this.getCount();%i++) {
 		%phrase = %this.getObject(%i);
+		if(%phrase.lastModified < $Client::Markov::LoadedAt) {
+			continue;
+		}
+
+		%count++;
 		
 		%file.openForWrite("config/client/markov/corpus/" @ %phrase.phrase);
 		
 		%file.writeLine(%phrase.phrase);
 		%file.writeLine(%phrase.count);
+		%file.writeLine(%phrase.lastModified);
+
 		for(%j=0;%j<%phrase.count;%j++) {
 			%file.writeLine(%phrase.choice[%j]);
+		}
+
+		if(%count % 250 == 0) {
+			echo("Saved" SPC %count SPC "modified/new phrases...");
 		}
 
 		%file.close();
 	}
 
 	%file.delete();
+
+	echo("Saved" SPC %count SPC "modified/new phrases.");
 }
 
 function MarkovPhraseDatabase::importDatabase(%this, %folder) {
@@ -130,6 +156,7 @@ function MarkovPhraseDatabase::importDatabase(%this, %folder) {
 		%phrase = %file.readLine();
 		%fixed = strReplace(%phrase, " ", "");
 		%count = %file.readLine();
+		%lastModified = %file.readLine();
 
 		if(%this.phraseExists(%phrase)) {
 			%obj = "MarkovPhrase" @ %fixed;
@@ -138,11 +165,17 @@ function MarkovPhraseDatabase::importDatabase(%this, %folder) {
 				class = "MarkovPhrase";
 				phrase = %phrase;
 				count = 0;
+				lastModified = %lastModified;
 			};
 			%this.add(%obj);
 
 			while(!%file.isEOF()) {
 				%obj.addChoice(%file.readLine());
+
+				%imported++;
+				if(%imported % 500 == 0) {
+					echo("Imported" SPC %imported SPC "phrases...");
+				}
 			}
 		}
 
@@ -150,6 +183,8 @@ function MarkovPhraseDatabase::importDatabase(%this, %folder) {
 
 		%filename = findNextFile(%pattern);
 	}
+
+	echo("Imported" SPC %imported SPC "phrases.");
 }
 
 package MarkovPackage {
@@ -157,18 +192,49 @@ package MarkovPackage {
 		%norm = normalizeMarkov(%msg);
 
 		if(normalizeMarkov(getSubStr(stripMLControlChars(%msg), 0, 1)) !$= "") {
-			MarkovPhraseDatabase.addToDatabase(%norm);
+			%blacklist = $Pref::Client::Markov::Blacklist;
+			%skip = false;
+
+			for(%i=0;%i<getFieldCount(%blacklist);%i++) {
+				%bword = getField(%blacklist, %i);
+
+				if($Pref::Client::Markov::BlacklistMode) {
+					if(stripos(%msg, %bword) != -1) {
+						%skip = true;
+					}
+				} else {
+					if(getWord(%norm, 0) $= %bword) {
+						%skip = true;
+					}
+				}
+			}
+
+			if(!%skip) {
+				MarkovPhraseDatabase.addToDatabase(%norm);
+			}
 		}
 
 		if(getWord(%msg, 0) $= "!markov") {
 			switch($Pref::Client::Markov::AllowChat) {
-				case 1:
-					if(stripMLControlChars(%name) $= $pref::Player::NetName || stripMLControlChars(%name) $= $pref::Player::LANName) {
-						commandToServer('messageSent', "** " @ MarkovPhraseDatabase.generate(getWord(%msg, 1)));
-					}
+				case 0:
+					return parent::clientCmdChatMessage(%a,%b,%c,%fmsg,%cp,%name,%cs,%msg);
 
-				case 2:
-					commandToServer('messageSent', "** " @ MarkovPhraseDatabase.generate(getWord(%msg, 1)));
+				case 1:
+					if(stripMLControlChars(%name) !$= $pref::Player::NetName) {
+						return parent::clientCmdChatMessage(%a,%b,%c,%fmsg,%cp,%name,%cs,%msg);
+					}
+			}
+
+			%word = getWord(%msg, 1);
+			
+			if(%word !$= "") {
+				while(%attempts < 300 && stripos(%phrase, %word) == -1) {
+					%attempts++;
+					%phrase = MarkovPhraseDatabase.generate();
+				}
+				commandToServer('messageSent', "** " @ %phrase);
+			} else {
+				commandToServer('messageSent', "** " @ MarkovPhraseDatabase.generate());
 			}
 		}
 
@@ -199,6 +265,15 @@ function readExample() {
 	}
 }
 
-if($Pref::Client::Markov::LoadOnStart) {
-	MarkovPhraseDatabase.importDatabase($Pref::Client::Markov::CorpusDirectory);
+if(!$Client::Markov::Loaded) {
+	if($Pref::Client::Markov::LoadOnStart) {
+		MarkovPhraseDatabase.importDatabase($Pref::Client::Markov::CorpusDirectory);
+	}
+
+	schedule(100, 0, setMarkovLoadedAt);
+	$Client::Markov::Loaded = 1;
+}
+
+function setMarkovLoadedAt() {
+	$Client::Markov::LoadedAt = getUTC();
 }
