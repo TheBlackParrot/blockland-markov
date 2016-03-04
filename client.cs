@@ -111,52 +111,46 @@ function MarkovPhraseDatabase::generate(%this, %potential) {
 
 function MarkovPhraseDatabase::exportDatabase(%this) {
 	%file = new FileObject();
+	%file.openForWrite("config/client/markov/corpus.txt");
 
 	%count = 0;
 
 	for(%i=0;%i<%this.getCount();%i++) {
 		%phrase = %this.getObject(%i);
-		if(%phrase.lastModified < $Client::Markov::LoadedAt) {
-			continue;
-		}
 
 		%count++;
-		
-		%file.openForWrite("config/client/markov/corpus/" @ %phrase.phrase);
-		
-		%file.writeLine(%phrase.phrase);
-		%file.writeLine(%phrase.count);
-		%file.writeLine(%phrase.lastModified);
 
+		%data = %phrase.phrase TAB %phrase.count TAB %phrase.lastModified;
 		for(%j=0;%j<%phrase.count;%j++) {
-			%file.writeLine(%phrase.choice[%j]);
+			%data = %data TAB %phrase.choice[%j];
 		}
+
+		%file.writeLine(%data);
 
 		if(%count % 250 == 0) {
-			echo("Saved" SPC %count SPC "modified/new phrases...");
+			echo("Saved" SPC %count SPC "phrases...");
 		}
-
-		%file.close();
 	}
 
+	%file.close();
 	%file.delete();
 
 	echo("Saved" SPC %count SPC "modified/new phrases.");
 }
 
 function MarkovPhraseDatabase::importDatabase(%this, %folder) {
-	%pattern = %folder @ "/*";
-	%filename = findFirstFile(%pattern);
-
 	%file = new FileObject();
+	%file.openForRead("config/client/markov/corpus.txt");
 
-	while(isFile(%filename)) {
-		%file.openForRead(%filename);
-
-		%phrase = %file.readLine();
+	while(!%file.isEOF()) {
+		%data = %file.readLine();
+	
+		%phrase = getField(%data, 0);
 		%fixed = strReplace(%phrase, " ", "");
-		%count = %file.readLine();
-		%lastModified = %file.readLine();
+	
+		%count = getField(%data, 1);
+
+		%lastModified = getField(%data, 2);
 
 		if(%this.phraseExists(%phrase)) {
 			%obj = "MarkovPhrase" @ %fixed;
@@ -167,22 +161,21 @@ function MarkovPhraseDatabase::importDatabase(%this, %folder) {
 				count = 0;
 				lastModified = %lastModified;
 			};
-			%this.add(%obj);
+		}
+		%this.add(%obj);
 
-			while(!%file.isEOF()) {
-				%obj.addChoice(%file.readLine());
+		for(%i=3;%i<getFieldCount(%data);%i++) {
+			%obj.addChoice(getField(%data, %i));
 
-				%imported++;
-				if(%imported % 500 == 0) {
-					echo("Imported" SPC %imported SPC "phrases...");
-				}
+			%imported++;
+			if(%imported % 500 == 0) {
+				echo("Imported" SPC %imported SPC "phrases...");
 			}
 		}
-
-		%file.close();
-
-		%filename = findNextFile(%pattern);
 	}
+
+	%file.close();
+	%file.delete();
 
 	echo("Imported" SPC %imported SPC "phrases.");
 }
